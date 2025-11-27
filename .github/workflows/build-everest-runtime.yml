@@ -194,6 +194,13 @@ jobs:
         with:
           path: source
 
+      - name: Verify dist artifact structure
+        run: |
+          echo "Contents of dist-artifact in workspace:"
+          ls -la dist-artifact/ || echo "dist-artifact not found in workspace"
+          echo "Checking if dist directory exists:"
+          ls -la dist-artifact/dist/ || echo "dist directory not found"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -221,8 +228,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: source/${{ env.DOCKER_DIRECTORY }}
-          file: source/${{ env.DOCKER_DIRECTORY }}/Dockerfile
+          context: .
+          file: ./source/${{ env.DOCKER_DIRECTORY }}/Dockerfile
           push: ${{ steps.source_repo.outputs.push_image == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -230,7 +237,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            DIST_PATH=../../dist-artifact/dist
+            DIST_PATH=dist-artifact/dist
 
       - name: Output image tags
         run: |
