@@ -96,8 +96,11 @@ jobs:
             
             // Get latest successful run
             let runId;
-            if ('${{ github.event_name }}' === 'workflow_run') {
-              runId = ${{ github.event.workflow_run.id }};
+            const eventName = '${{ github.event_name }}';
+            const workflowRunId = '${{ github.event.workflow_run.id }}';
+            
+            if (eventName === 'workflow_run' && workflowRunId && workflowRunId !== '') {
+              runId = parseInt(workflowRunId, 10);
             } else {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: owner,
@@ -126,7 +129,7 @@ jobs:
             const repo = '${{ steps.source_repo.outputs.repo }}'.split('/');
             const owner = repo[0];
             const repoName = repo[1];
-            const runId = ${{ steps.get_run.outputs.run_id }};
+            const runId = parseInt('${{ steps.get_run.outputs.run_id }}', 10);
             const artifactName = '${{ steps.source_repo.outputs.artifact }}';
             
             const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
