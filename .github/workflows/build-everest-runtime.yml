@@ -1,0 +1,241 @@
+name: Build EVerest Runtime Container
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Repository to download dist artifact from'
+        required: false
+        default: 'project-lookout/everest-core'
+        type: string
+      workflow_name:
+        description: 'Workflow name to get artifact from'
+        required: false
+        default: 'Build, Lint and Test'
+        type: string
+      artifact_name:
+        description: 'Name of the artifact to download'
+        required: false
+        default: 'dist'
+        type: string
+      image_name:
+        description: 'Name of the Docker image to build'
+        required: false
+        default: 'everest-runtime'
+        type: string
+      docker_registry:
+        description: 'Docker registry to push to'
+        required: false
+        default: 'ghcr.io'
+        type: string
+      push_image:
+        description: 'Push image to registry'
+        required: false
+        default: true
+        type: boolean
+  workflow_run:
+    workflows: ["Build, Lint and Test"]
+    types:
+      - completed
+    branches:
+      - main
+      - master
+
+env:
+  DOCKER_DIRECTORY: docker/images/everest-runtime
+
+jobs:
+  build-runtime:
+    name: Build EVerest Runtime Image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Determine source repository
+        id: source_repo
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "repo=${{ inputs.source_repo || 'project-lookout/everest-core' }}" >> $GITHUB_OUTPUT
+            echo "workflow=${{ inputs.workflow_name || 'Build, Lint and Test' }}" >> $GITHUB_OUTPUT
+            echo "artifact=${{ inputs.artifact_name || 'dist' }}" >> $GITHUB_OUTPUT
+            echo "image_name=${{ inputs.image_name || 'everest-runtime' }}" >> $GITHUB_OUTPUT
+            echo "docker_registry=${{ inputs.docker_registry || 'ghcr.io' }}" >> $GITHUB_OUTPUT
+            echo "push_image=${{ inputs.push_image != false }}" >> $GITHUB_OUTPUT
+          else
+            echo "repo=${{ github.event.workflow_run.repository.full_name }}" >> $GITHUB_OUTPUT
+            echo "workflow=${{ github.event.workflow_run.name }}" >> $GITHUB_OUTPUT
+            echo "artifact=dist" >> $GITHUB_OUTPUT
+            echo "image_name=everest-runtime" >> $GITHUB_OUTPUT
+            echo "docker_registry=ghcr.io" >> $GITHUB_OUTPUT
+            echo "push_image=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get latest successful workflow run
+        id: get_run
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const repo = '${{ steps.source_repo.outputs.repo }}'.split('/');
+            const owner = repo[0];
+            const repoName = repo[1];
+            const workflowName = '${{ steps.source_repo.outputs.workflow }}';
+            
+            // Get workflow ID
+            const workflows = await github.rest.actions.listRepoWorkflows({
+              owner: owner,
+              repo: repoName,
+            });
+            
+            const workflow = workflows.data.workflows.find(w => w.name === workflowName);
+            if (!workflow) {
+              throw new Error(`Workflow "${workflowName}" not found in ${owner}/${repoName}`);
+            }
+            
+            // Get latest successful run
+            let runId;
+            if ('${{ github.event_name }}' === 'workflow_run') {
+              runId = ${{ github.event.workflow_run.id }};
+            } else {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: owner,
+                repo: repoName,
+                workflow_id: workflow.id,
+                status: 'success',
+                per_page: 1,
+              });
+              
+              if (runs.data.workflow_runs.length === 0) {
+                throw new Error(`No successful runs found for workflow "${workflowName}"`);
+              }
+              
+              runId = runs.data.workflow_runs[0].id;
+            }
+            
+            core.setOutput('run_id', runId);
+            console.log(`Using workflow run ID: ${runId}`);
+
+      - name: Get artifact ID
+        id: get_artifact
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const repo = '${{ steps.source_repo.outputs.repo }}'.split('/');
+            const owner = repo[0];
+            const repoName = repo[1];
+            const runId = ${{ steps.get_run.outputs.run_id }};
+            const artifactName = '${{ steps.source_repo.outputs.artifact }}';
+            
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: owner,
+              repo: repoName,
+              run_id: runId,
+            });
+            
+            const artifact = artifacts.data.artifacts.find(a => a.name === artifactName);
+            if (!artifact) {
+              throw new Error(`Artifact "${artifactName}" not found in run ${runId}`);
+            }
+            
+            core.setOutput('artifact_id', artifact.id);
+            core.setOutput('artifact_size', artifact.size_in_bytes);
+            console.log(`Found artifact "${artifactName}" with ID: ${artifact.id}, size: ${artifact.size_in_bytes} bytes`);
+
+      - name: Download artifact
+        run: |
+          REPO="${{ steps.source_repo.outputs.repo }}"
+          OWNER=$(echo "$REPO" | cut -d'/' -f1)
+          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+          ARTIFACT_ID="${{ steps.get_artifact.outputs.artifact_id }}"
+          
+          # Create directory for artifact
+          mkdir -p dist-artifact
+          
+          # Download artifact (GitHub API returns a redirect, curl -L follows it)
+          curl -L \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO_NAME}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            -o dist-artifact/artifact.zip
+          
+          if [ ! -f dist-artifact/artifact.zip ] || [ ! -s dist-artifact/artifact.zip ]; then
+            echo "Error: Failed to download artifact or artifact is empty"
+            exit 1
+          fi
+          
+          echo "Downloaded artifact to dist-artifact/artifact.zip ($(du -h dist-artifact/artifact.zip | cut -f1))"
+
+      - name: Extract dist artifact
+        run: |
+          cd dist-artifact
+          unzip -q artifact.zip
+          rm artifact.zip
+          # GitHub artifacts are zipped, so we need to extract the tar.gz if it exists
+          if [ -f dist.tar.gz ]; then
+            tar -xzf dist.tar.gz
+            echo "Extracted dist.tar.gz"
+          elif [ -d dist ]; then
+            echo "dist directory already exists"
+          else
+            echo "Error: Could not find dist.tar.gz or dist directory"
+            ls -la
+            exit 1
+          fi
+          ls -la
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.source_repo.outputs.docker_registry }}/${{ github.repository_owner }}/${{ steps.source_repo.outputs.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Login to Container Registry
+        if: ${{ steps.source_repo.outputs.push_image == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.source_repo.outputs.docker_registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: source/${{ env.DOCKER_DIRECTORY }}
+          file: source/${{ env.DOCKER_DIRECTORY }}/Dockerfile
+          push: ${{ steps.source_repo.outputs.push_image == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            DIST_PATH=../../dist-artifact/dist
+
+      - name: Output image tags
+        run: |
+          echo "Built image with tags:"
+          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n'
+          if [ "${{ steps.source_repo.outputs.push_image }}" == "true" ]; then
+            echo "Image pushed to registry"
+          else
+            echo "Image built but not pushed (push_image=false)"
+          fi
+
